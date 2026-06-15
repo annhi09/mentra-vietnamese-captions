@@ -18,6 +18,9 @@ The app is based on the official `Mentra-Community/MentraOS-Display-Example-App`
 - Converts Vietnamese diacritics to ASCII-safe text before display.
 - Keeps English and normal Latin text unchanged.
 - Preserves the original transcript in app logs/state.
+- Serves a live browser transcript page at `/` and `/transcript`.
+- Streams live browser updates with Server-Sent Events from `/events`.
+- Keeps the most recent 200 transcript lines in memory.
 - Logs original transcript, converted display text, final/interim state, language metadata when present, and display mode.
 
 ## Configuration
@@ -62,6 +65,15 @@ Run the development server:
 npm run dev
 ```
 
+Open the browser transcript page:
+
+```text
+http://localhost:3000/
+http://localhost:3000/transcript
+```
+
+The page shows newest captions at the bottom, auto-scrolls to the latest line, and displays both the original transcript and the ASCII-safe display text sent to the glasses.
+
 ## Register In MentraOS
 
 1. Open `https://console.mentra.glass`.
@@ -79,13 +91,53 @@ ngrok http 3000
 
 The `PACKAGE_NAME` in `.env` must exactly match the package name registered in the console.
 
+## Browser Transcript Page
+
+The app serves a live caption page from the same server used by MentraOS:
+
+```text
+GET /
+GET /transcript
+GET /events
+POST /transcript/clear
+```
+
+Use `/events` only from the browser page or an SSE client. It streams history on connect, then pushes each new transcript item as it arrives. The Clear button calls `POST /transcript/clear` and clears the in-memory history for all connected browser clients.
+
+The browser only receives transcript items:
+
+- `timestamp`
+- `originalText`
+- `displayText`
+- `isFinal`
+- `language`
+
+`MENTRAOS_API_KEY` stays server-side and is never embedded in browser/client code.
+
+For Render, open your deployed app URL directly:
+
+```text
+https://your-render-service-name.onrender.com/
+https://your-render-service-name.onrender.com/transcript
+```
+
+Use the same Render URL as the MentraOS app Public URL in `https://console.mentra.glass`.
+
 ## Test With Even Realities Glasses
 
 1. Pair and connect the Even Realities glasses through MentraOS.
 2. Start this server with `npm run dev`.
-3. Start the app from MentraOS.
-4. Speak Vietnamese near the phone/glasses microphone.
-5. Confirm logs show both the original and converted transcript, and the glasses display ASCII-safe captions.
+3. Open `http://localhost:3000/transcript`, or open your ngrok/Render URL in a browser.
+4. Start the app from MentraOS.
+5. Speak English near the phone/glasses microphone and confirm the browser and glasses show English unchanged.
+6. Speak Vietnamese near the phone/glasses microphone and confirm the browser shows both forms:
+
+```text
+Original: Tôi đang đi làm
+Display: Toi dang di lam
+```
+
+7. Confirm logs show both the original and converted transcript, the browser auto-scrolls, and the glasses display ASCII-safe captions.
 
 ## Development
 
