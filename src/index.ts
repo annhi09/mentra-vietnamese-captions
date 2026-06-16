@@ -14,6 +14,17 @@ const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY ?? (() => { throw new Erro
 const PORT = parseInt(process.env.PORT || '3000');
 const vietnameseDisplayMode = parseVietnameseDisplayMode(process.env.VIETNAMESE_DISPLAY_MODE);
 const MAX_TRANSCRIPT_LINES = 200;
+const GLASSES_MAX_LINES = parsePositiveInteger(process.env.GLASSES_MAX_LINES, 4);
+const GLASSES_DISPLAY_DURATION_MS = parsePositiveInteger(process.env.GLASSES_DISPLAY_DURATION_MS, 4000);
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 type TranscriptLogEntry = {
   id: string;
@@ -29,6 +40,8 @@ type TranscriptLogEntry = {
 class VietnameseSafeCaptionsApp extends AppServer {
   private readonly transcriptLog: TranscriptLogEntry[] = [];
   private readonly browserClients = new Set<Response>();
+  private currentInterimTranscript: TranscriptLogEntry | null = null;
+  private readonly committedUtteranceIds = new Set<string>();
 
   constructor() {
     super({
@@ -41,8 +54,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
   }
 
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
-    // Show welcome message
-    session.layouts.showTextWall("Vietnamese Safe Captions is ready.");
+    const recentFinalDisplayLines: string[] = [];
 
     // Handle real-time transcription
     // requires microphone permission to be set in the developer console
@@ -54,7 +66,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
       const containsVietnamese = containsVietnameseCharacters(originalText);
 
       const logEntry: TranscriptLogEntry = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        id: typeof data.utteranceId === "string" ? data.utteranceId : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         originalText,
         displayText,
         isFinal: data.isFinal,
@@ -64,7 +76,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
         timestamp: new Date().toISOString(),
       };
 
-      this.addTranscriptEntry(logEntry);
+      this.recordTranscriptEntry(logEntry, typeof data.utteranceId === "string" ? data.utteranceId : undefined);
 
       console.log("Transcript received", {
         originalTranscript: originalText,
@@ -77,10 +89,18 @@ class VietnameseSafeCaptionsApp extends AppServer {
         userId,
       });
 
-      session.layouts.showTextWall(displayText, {
-        view: ViewType.MAIN,
-        durationMs: data.isFinal ? 3000 : 1000
-      });
+      if (data.isFinal) {
+        recentFinalDisplayLines.push(displayText);
+
+        if (recentFinalDisplayLines.length > GLASSES_MAX_LINES) {
+          recentFinalDisplayLines.splice(0, recentFinalDisplayLines.length - GLASSES_MAX_LINES);
+        }
+
+        session.layouts.showTextWall(recentFinalDisplayLines.join("\n"), {
+          view: ViewType.MAIN,
+          durationMs: GLASSES_DISPLAY_DURATION_MS
+        });
+      }
     })
 
     session.events.onGlassesBattery((data) => {
@@ -106,7 +126,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
         "X-Accel-Buffering": "no",
       });
 
-      response.write(`event: history\ndata: ${JSON.stringify(this.transcriptLog)}\n\n`);
+      response.write(`event: history\ndata: ${JSON.stringify(this.getBrowserTranscriptItems())}\n\n`);
       this.browserClients.add(response);
 
       request.on("close", () => {
@@ -116,12 +136,34 @@ class VietnameseSafeCaptionsApp extends AppServer {
 
     expressApp.post("/transcript/clear", (_request, response) => {
       this.transcriptLog.length = 0;
+      this.currentInterimTranscript = null;
+      this.committedUtteranceIds.clear();
       this.broadcastSse("clear", { clearedAt: new Date().toISOString() });
       response.status(204).send();
     });
   }
 
-  private addTranscriptEntry(entry: TranscriptLogEntry): void {
+  private recordTranscriptEntry(entry: TranscriptLogEntry, utteranceId: string | undefined): void {
+    if (!entry.isFinal) {
+      this.currentInterimTranscript = {
+        ...entry,
+        id: utteranceId ?? "current-interim",
+      };
+      this.broadcastSse("interim", this.currentInterimTranscript);
+      return;
+    }
+
+    if (utteranceId) {
+      if (this.committedUtteranceIds.has(utteranceId)) {
+        this.currentInterimTranscript = null;
+        this.broadcastSse("interim", null);
+        return;
+      }
+
+      this.committedUtteranceIds.add(utteranceId);
+    }
+
+    this.currentInterimTranscript = null;
     this.transcriptLog.push(entry);
 
     if (this.transcriptLog.length > MAX_TRANSCRIPT_LINES) {
@@ -129,6 +171,13 @@ class VietnameseSafeCaptionsApp extends AppServer {
     }
 
     this.broadcastSse("transcript", entry);
+    this.broadcastSse("interim", null);
+  }
+
+  private getBrowserTranscriptItems(): TranscriptLogEntry[] {
+    return this.currentInterimTranscript
+      ? [...this.transcriptLog, this.currentInterimTranscript]
+      : [...this.transcriptLog];
   }
 
   private broadcastSse(eventName: string, payload: unknown): void {
@@ -140,7 +189,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
   }
 
   private renderTranscriptPage(): string {
-    const initialHistory = JSON.stringify(this.transcriptLog).replace(/</g, "\\u003c");
+    const initialHistory = JSON.stringify(this.getBrowserTranscriptItems()).replace(/</g, "\\u003c");
 
     return `<!doctype html>
 <html lang="en">
@@ -206,6 +255,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
       display: flex;
       align-items: center;
       gap: 12px;
+      flex-wrap: wrap;
     }
 
     .status {
@@ -227,6 +277,32 @@ class VietnameseSafeCaptionsApp extends AppServer {
     button:hover {
       border-color: var(--danger);
       color: #ffd5da;
+    }
+
+    .tabs {
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #0d141d;
+    }
+
+    .tab {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 7px 10px;
+    }
+
+    .tab[aria-selected="true"] {
+      background: var(--panel-2);
+      color: var(--text);
+    }
+
+    .tab:hover {
+      border: 0;
+      color: var(--text);
     }
 
     main {
@@ -254,17 +330,17 @@ class VietnameseSafeCaptionsApp extends AppServer {
     .caption-header {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
       color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 12px;
+      font-size: 12px;
+      margin-bottom: 8px;
       flex-wrap: wrap;
     }
 
     .badge {
-      border: 1px solid var(--border);
       border-radius: 999px;
-      padding: 3px 8px;
+      padding: 3px 7px;
+      background: #0d141d;
       color: var(--accent);
       text-transform: uppercase;
       font-size: 11px;
@@ -274,7 +350,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
     .line {
       display: grid;
       gap: 5px;
-      margin-top: 10px;
+      margin-top: 8px;
     }
 
     .label {
@@ -295,6 +371,10 @@ class VietnameseSafeCaptionsApp extends AppServer {
       color: #d8ffe9;
     }
 
+    .original .text {
+      color: #e8eff8;
+    }
+
     @media (max-width: 640px) {
       header {
         align-items: flex-start;
@@ -303,6 +383,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
 
       .actions {
         width: 100%;
+        align-items: flex-start;
         justify-content: space-between;
       }
 
@@ -324,6 +405,11 @@ class VietnameseSafeCaptionsApp extends AppServer {
         <div class="meta">Original transcript and ASCII-safe glasses display</div>
       </div>
       <div class="actions">
+        <div class="tabs" role="tablist" aria-label="Transcript view">
+          <button class="tab" type="button" role="tab" data-view="display" aria-selected="true">Display</button>
+          <button class="tab" type="button" role="tab" data-view="original" aria-selected="false">Original</button>
+          <button class="tab" type="button" role="tab" data-view="both" aria-selected="false">Both</button>
+        </div>
         <span id="connectionStatus" class="status">Connecting...</span>
         <button id="clearButton" type="button">Clear</button>
       </div>
@@ -337,7 +423,9 @@ class VietnameseSafeCaptionsApp extends AppServer {
     const transcriptList = document.getElementById("transcriptList");
     const connectionStatus = document.getElementById("connectionStatus");
     const clearButton = document.getElementById("clearButton");
+    const tabs = Array.from(document.querySelectorAll(".tab"));
     let transcriptItems = [];
+    let selectedView = "display";
 
     function formatTimestamp(timestamp) {
       try {
@@ -357,6 +445,22 @@ class VietnameseSafeCaptionsApp extends AppServer {
       }
 
       return "language " + String(value);
+    }
+
+    function createLine(kind, labelText, bodyText) {
+      const line = document.createElement("div");
+      line.className = "line " + kind;
+
+      const label = document.createElement("div");
+      label.className = "label";
+      label.textContent = labelText;
+
+      const text = document.createElement("div");
+      text.className = "text";
+      text.textContent = bodyText || "";
+
+      line.append(label, text);
+      return line;
     }
 
     function render() {
@@ -389,27 +493,19 @@ class VietnameseSafeCaptionsApp extends AppServer {
 
         header.append(badge, time, language);
 
-        const original = document.createElement("div");
-        original.className = "line original";
-        const originalLabel = document.createElement("div");
-        originalLabel.className = "label";
-        originalLabel.textContent = "Original";
-        const originalText = document.createElement("div");
-        originalText.className = "text";
-        originalText.textContent = item.originalText || "";
-        original.append(originalLabel, originalText);
+        article.append(header);
 
-        const display = document.createElement("div");
-        display.className = "line display";
-        const displayLabel = document.createElement("div");
-        displayLabel.className = "label";
-        displayLabel.textContent = "Display";
-        const displayText = document.createElement("div");
-        displayText.className = "text";
-        displayText.textContent = item.displayText || "";
-        display.append(displayLabel, displayText);
+        if (selectedView === "original") {
+          article.append(createLine("original", "Original", item.originalText));
+        } else if (selectedView === "both") {
+          article.append(
+            createLine("original", "Original", item.originalText),
+            createLine("display", "Display", item.displayText),
+          );
+        } else {
+          article.append(createLine("display", "Display", item.displayText));
+        }
 
-        article.append(header, original, display);
         transcriptList.append(article);
       }
 
@@ -422,10 +518,34 @@ class VietnameseSafeCaptionsApp extends AppServer {
     }
 
     function appendTranscript(item) {
+      transcriptItems = transcriptItems.filter((existing) => existing.isFinal && existing.id !== item.id);
       transcriptItems.push(item);
       transcriptItems = transcriptItems.slice(-maxTranscriptLines);
       render();
     }
+
+    function updateInterim(item) {
+      transcriptItems = transcriptItems.filter((existing) => existing.isFinal);
+
+      if (item) {
+        transcriptItems.push(item);
+      }
+
+      transcriptItems = transcriptItems.slice(-maxTranscriptLines);
+      render();
+    }
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => {
+        selectedView = tab.dataset.view || "display";
+
+        for (const candidate of tabs) {
+          candidate.setAttribute("aria-selected", String(candidate === tab));
+        }
+
+        render();
+      });
+    });
 
     clearButton.addEventListener("click", async () => {
       clearButton.disabled = true;
@@ -457,6 +577,9 @@ class VietnameseSafeCaptionsApp extends AppServer {
     });
     events.addEventListener("transcript", (event) => {
       appendTranscript(JSON.parse(event.data));
+    });
+    events.addEventListener("interim", (event) => {
+      updateInterim(JSON.parse(event.data));
     });
     events.addEventListener("clear", () => {
       setHistory([]);

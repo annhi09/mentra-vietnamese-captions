@@ -17,9 +17,12 @@ The app is based on the official `Mentra-Community/MentraOS-Display-Example-App`
 - Detects Vietnamese characters in transcript text.
 - Converts Vietnamese diacritics to ASCII-safe text before display.
 - Keeps English and normal Latin text unchanged.
+- Shows only final captions on glasses.
+- Shows up to 4 recent final caption lines on glasses by default.
 - Preserves the original transcript in app logs/state.
 - Serves a live browser transcript page at `/` and `/transcript`.
 - Streams live browser updates with Server-Sent Events from `/events`.
+- Updates the current browser interim caption in place instead of appending every interim event.
 - Keeps the most recent 200 transcript lines in memory.
 - Logs original transcript, converted display text, final/interim state, language metadata when present, and display mode.
 
@@ -38,12 +41,21 @@ PORT=3000
 PACKAGE_NAME=com.yourname.vietnamese_safe_captions
 MENTRAOS_API_KEY=your_api_key_here
 VIETNAMESE_DISPLAY_MODE=ascii
+GLASSES_MAX_LINES=4
+GLASSES_DISPLAY_DURATION_MS=4000
 ```
 
 `VIETNAMESE_DISPLAY_MODE` can be:
 
 - `ascii`: strip Vietnamese diacritics before display. This is the default.
 - `original`: display transcript text exactly as MentraOS sends it.
+
+Glasses display settings:
+
+- `GLASSES_MAX_LINES`: number of recent final caption lines to show on glasses. Default: `4`.
+- `GLASSES_DISPLAY_DURATION_MS`: how long the recent final captions remain visible on glasses. Default: `4000`.
+
+The glasses display never shows interim transcript events. It only sends final captions, using the selected `VIETNAMESE_DISPLAY_MODE`.
 
 ## Install
 
@@ -72,7 +84,7 @@ http://localhost:3000/
 http://localhost:3000/transcript
 ```
 
-The page shows newest captions at the bottom, auto-scrolls to the latest line, and displays both the original transcript and the ASCII-safe display text sent to the glasses.
+The page shows newest captions at the bottom, auto-scrolls to the latest line, and has Display, Original, and Both tabs. Display is the default tab.
 
 ## Register In MentraOS
 
@@ -103,6 +115,8 @@ POST /transcript/clear
 ```
 
 Use `/events` only from the browser page or an SSE client. It streams history on connect, then pushes each new transcript item as it arrives. The Clear button calls `POST /transcript/clear` and clears the in-memory history for all connected browser clients.
+
+Interim transcript events update one current interim line in the browser. When the final transcript arrives, the app commits one final line and clears the interim line.
 
 The browser only receives transcript items:
 
@@ -138,6 +152,14 @@ Display: Toi dang di lam
 ```
 
 7. Confirm logs show both the original and converted transcript, the browser auto-scrolls, and the glasses display ASCII-safe captions.
+8. Confirm the glasses show recent final lines only, for example:
+
+```text
+Hello Long.
+How are you?
+I am going to work.
+See you later.
+```
 
 ## Development
 
