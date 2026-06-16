@@ -17,7 +17,8 @@ The app is based on the official `Mentra-Community/MentraOS-Display-Example-App`
 - Detects Vietnamese characters in transcript text.
 - Converts Vietnamese diacritics to ASCII-safe text before display.
 - Keeps English and normal Latin text unchanged.
-- Shows only final captions on glasses.
+- Shows low-latency interim captions on glasses while speaking.
+- Replaces the active interim caption with the final caption when MentraOS sends the final event.
 - Shows up to 4 recent final caption lines on glasses by default.
 - Preserves the original transcript in app logs/state.
 - Serves a live browser transcript page at `/` and `/transcript`.
@@ -43,6 +44,7 @@ MENTRAOS_API_KEY=your_api_key_here
 VIETNAMESE_DISPLAY_MODE=ascii
 GLASSES_MAX_LINES=4
 GLASSES_DISPLAY_DURATION_MS=4000
+SHOW_INTERIM_ON_GLASSES=true
 ```
 
 `VIETNAMESE_DISPLAY_MODE` can be:
@@ -54,8 +56,9 @@ Glasses display settings:
 
 - `GLASSES_MAX_LINES`: number of recent final caption lines to show on glasses. Default: `4`.
 - `GLASSES_DISPLAY_DURATION_MS`: how long the recent final captions remain visible on glasses. Default: `4000`.
+- `SHOW_INTERIM_ON_GLASSES`: show interim transcript updates on glasses for lower latency. Default: `true`.
 
-The glasses display never shows interim transcript events. It only sends final captions, using the selected `VIETNAMESE_DISPLAY_MODE`.
+The glasses display format is recent final lines plus one current interim line. New transcript events update the glasses immediately; display duration does not queue or delay newer captions.
 
 ## Install
 
@@ -152,7 +155,15 @@ Display: Toi dang di lam
 ```
 
 7. Confirm logs show both the original and converted transcript, the browser auto-scrolls, and the glasses display ASCII-safe captions.
-8. Confirm the glasses show recent final lines only, for example:
+8. Confirm interim speech updates quickly in place on glasses:
+
+```text
+Uh,
+Uh, ok
+Uh, okay.
+```
+
+9. Confirm final captions remain as recent history, for example:
 
 ```text
 Hello Long.

@@ -16,6 +16,7 @@ const vietnameseDisplayMode = parseVietnameseDisplayMode(process.env.VIETNAMESE_
 const MAX_TRANSCRIPT_LINES = 200;
 const GLASSES_MAX_LINES = parsePositiveInteger(process.env.GLASSES_MAX_LINES, 4);
 const GLASSES_DISPLAY_DURATION_MS = parsePositiveInteger(process.env.GLASSES_DISPLAY_DURATION_MS, 4000);
+const SHOW_INTERIM_ON_GLASSES = parseBoolean(process.env.SHOW_INTERIM_ON_GLASSES, true);
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
   if (!value) {
@@ -24,6 +25,14 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  return value.toLowerCase() !== "false";
 }
 
 type TranscriptLogEntry = {
@@ -55,6 +64,21 @@ class VietnameseSafeCaptionsApp extends AppServer {
 
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
     const recentFinalDisplayLines: string[] = [];
+    let currentInterimDisplayLine: string | null = null;
+    const renderGlassesCaptions = () => {
+      const lines = currentInterimDisplayLine
+        ? [...recentFinalDisplayLines, currentInterimDisplayLine]
+        : recentFinalDisplayLines;
+
+      if (lines.length === 0) {
+        return;
+      }
+
+      session.layouts.showTextWall(lines.join("\n"), {
+        view: ViewType.MAIN,
+        durationMs: GLASSES_DISPLAY_DURATION_MS
+      });
+    };
 
     // Handle real-time transcription
     // requires microphone permission to be set in the developer console
@@ -76,7 +100,10 @@ class VietnameseSafeCaptionsApp extends AppServer {
         timestamp: new Date().toISOString(),
       };
 
-      this.recordTranscriptEntry(logEntry, typeof data.utteranceId === "string" ? data.utteranceId : undefined);
+      const shouldRenderTranscript = this.recordTranscriptEntry(
+        logEntry,
+        typeof data.utteranceId === "string" ? data.utteranceId : undefined,
+      );
 
       console.log("Transcript received", {
         originalTranscript: originalText,
@@ -85,21 +112,30 @@ class VietnameseSafeCaptionsApp extends AppServer {
         containsVietnamese,
         language,
         vietnameseDisplayMode,
+        showInterimOnGlasses: SHOW_INTERIM_ON_GLASSES,
         sessionId,
         userId,
       });
 
+      if (!shouldRenderTranscript) {
+        return;
+      }
+
       if (data.isFinal) {
+        currentInterimDisplayLine = null;
         recentFinalDisplayLines.push(displayText);
 
         if (recentFinalDisplayLines.length > GLASSES_MAX_LINES) {
           recentFinalDisplayLines.splice(0, recentFinalDisplayLines.length - GLASSES_MAX_LINES);
         }
 
-        session.layouts.showTextWall(recentFinalDisplayLines.join("\n"), {
-          view: ViewType.MAIN,
-          durationMs: GLASSES_DISPLAY_DURATION_MS
-        });
+        renderGlassesCaptions();
+        return;
+      }
+
+      if (SHOW_INTERIM_ON_GLASSES) {
+        currentInterimDisplayLine = displayText;
+        renderGlassesCaptions();
       }
     })
 
@@ -143,21 +179,21 @@ class VietnameseSafeCaptionsApp extends AppServer {
     });
   }
 
-  private recordTranscriptEntry(entry: TranscriptLogEntry, utteranceId: string | undefined): void {
+  private recordTranscriptEntry(entry: TranscriptLogEntry, utteranceId: string | undefined): boolean {
     if (!entry.isFinal) {
       this.currentInterimTranscript = {
         ...entry,
         id: utteranceId ?? "current-interim",
       };
       this.broadcastSse("interim", this.currentInterimTranscript);
-      return;
+      return true;
     }
 
     if (utteranceId) {
       if (this.committedUtteranceIds.has(utteranceId)) {
         this.currentInterimTranscript = null;
         this.broadcastSse("interim", null);
-        return;
+        return false;
       }
 
       this.committedUtteranceIds.add(utteranceId);
@@ -172,6 +208,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
 
     this.broadcastSse("transcript", entry);
     this.broadcastSse("interim", null);
+    return true;
   }
 
   private getBrowserTranscriptItems(): TranscriptLogEntry[] {
