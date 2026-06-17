@@ -17,6 +17,7 @@ const MAX_TRANSCRIPT_LINES = 200;
 const GLASSES_MAX_LINES = parsePositiveInteger(process.env.GLASSES_MAX_LINES, 4);
 const GLASSES_DISPLAY_DURATION_MS = parsePositiveInteger(process.env.GLASSES_DISPLAY_DURATION_MS, 4000);
 const SHOW_INTERIM_ON_GLASSES = parseBoolean(process.env.SHOW_INTERIM_ON_GLASSES, true);
+const GLASSES_RENDER_THROTTLE_MS = 120;
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
   if (!value) {
@@ -65,24 +66,77 @@ class VietnameseSafeCaptionsApp extends AppServer {
   protected async onSession(session: AppSession, sessionId: string, userId: string): Promise<void> {
     const recentFinalDisplayLines: string[] = [];
     let currentInterimDisplayLine: string | null = null;
-    const renderGlassesCaptions = () => {
+    let transcriptSequence = 0;
+    let latestRenderableSequence = 0;
+    let latestRenderedSequence = 0;
+    let pendingGlassesRender: { sequence: number; text: string } | null = null;
+    let glassesRenderTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastGlassesRenderAt = 0;
+
+    const getGlassesCaptionText = () => {
       const lines = currentInterimDisplayLine
         ? [...recentFinalDisplayLines, currentInterimDisplayLine]
         : recentFinalDisplayLines;
 
-      if (lines.length === 0) {
+      return lines.join("\n");
+    };
+
+    const flushPendingGlassesRender = () => {
+      glassesRenderTimer = null;
+
+      if (!pendingGlassesRender) {
         return;
       }
 
-      session.layouts.showTextWall(lines.join("\n"), {
+      const render = pendingGlassesRender;
+      pendingGlassesRender = null;
+
+      if (
+        render.sequence < transcriptSequence ||
+        render.sequence < latestRenderableSequence ||
+        render.sequence <= latestRenderedSequence
+      ) {
+        return;
+      }
+
+      latestRenderedSequence = render.sequence;
+      lastGlassesRenderAt = Date.now();
+      session.layouts.showTextWall(render.text, {
         view: ViewType.MAIN,
         durationMs: GLASSES_DISPLAY_DURATION_MS
       });
     };
 
+    const scheduleGlassesRender = (sequence: number) => {
+      const text = getGlassesCaptionText();
+
+      if (!text) {
+        return;
+      }
+
+      latestRenderableSequence = sequence;
+      pendingGlassesRender = { sequence, text };
+
+      if (glassesRenderTimer) {
+        return;
+      }
+
+      const elapsedMs = Date.now() - lastGlassesRenderAt;
+      const delayMs = Math.max(GLASSES_RENDER_THROTTLE_MS - elapsedMs, 0);
+
+      if (delayMs === 0) {
+        flushPendingGlassesRender();
+        return;
+      }
+
+      glassesRenderTimer = setTimeout(flushPendingGlassesRender, delayMs);
+    };
+
     // Handle real-time transcription
     // requires microphone permission to be set in the developer console
     session.events.onTranscription((data) => {
+      transcriptSequence += 1;
+      const eventSequence = transcriptSequence;
       const originalText = data.text;
       const displayText = getVietnameseDisplayText(originalText, vietnameseDisplayMode);
       const metadata = data as unknown as Record<string, unknown>;
@@ -113,6 +167,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
         language,
         vietnameseDisplayMode,
         showInterimOnGlasses: SHOW_INTERIM_ON_GLASSES,
+        transcriptSequence: eventSequence,
         sessionId,
         userId,
       });
@@ -129,13 +184,13 @@ class VietnameseSafeCaptionsApp extends AppServer {
           recentFinalDisplayLines.splice(0, recentFinalDisplayLines.length - GLASSES_MAX_LINES);
         }
 
-        renderGlassesCaptions();
+        scheduleGlassesRender(eventSequence);
         return;
       }
 
       if (SHOW_INTERIM_ON_GLASSES) {
         currentInterimDisplayLine = displayText;
-        renderGlassesCaptions();
+        scheduleGlassesRender(eventSequence);
       }
     })
 

@@ -20,6 +20,7 @@ The app is based on the official `Mentra-Community/MentraOS-Display-Example-App`
 - Shows low-latency interim captions on glasses while speaking.
 - Replaces the active interim caption with the final caption when MentraOS sends the final event.
 - Shows up to 4 recent final caption lines on glasses by default.
+- Coalesces rapid glasses updates to the newest transcript state with a 120 ms throttle.
 - Preserves the original transcript in app logs/state.
 - Serves a live browser transcript page at `/` and `/transcript`.
 - Streams live browser updates with Server-Sent Events from `/events`.
@@ -58,7 +59,7 @@ Glasses display settings:
 - `GLASSES_DISPLAY_DURATION_MS`: how long the recent final captions remain visible on glasses. Default: `4000`.
 - `SHOW_INTERIM_ON_GLASSES`: show interim transcript updates on glasses for lower latency. Default: `true`.
 
-The glasses display format is recent final lines plus one current interim line. New transcript events update the glasses immediately; display duration does not queue or delay newer captions.
+The glasses display format is recent final lines plus one current interim line. New transcript events update the latest pending glasses text immediately; rapid interim bursts are lightly throttled to one render about every 120 ms, always using the newest transcript state. Display duration does not queue or delay newer captions.
 
 ## Install
 
