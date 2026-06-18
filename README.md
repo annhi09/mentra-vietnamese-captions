@@ -19,8 +19,11 @@ The app is based on the official `Mentra-Community/MentraOS-Display-Example-App`
 - Keeps English and normal Latin text unchanged.
 - Shows low-latency interim captions on glasses while speaking.
 - Replaces the active interim caption with the final caption when MentraOS sends the final event.
-- Shows up to 4 recent final caption lines on glasses by default.
+- Shows only the current speech window on glasses.
+- Clears the glasses caption window after 5 seconds of silence by default.
+- Shows up to 4 recent final caption lines from the current speech window by default.
 - Coalesces rapid glasses updates to the newest transcript state with a 120 ms throttle.
+- Adds speaker labels on glasses when MentraOS transcript events include speaker metadata.
 - Preserves the original transcript in app logs/state.
 - Serves a live browser transcript page at `/` and `/transcript`.
 - Streams live browser updates with Server-Sent Events from `/events`.
@@ -46,6 +49,8 @@ VIETNAMESE_DISPLAY_MODE=ascii
 GLASSES_MAX_LINES=4
 GLASSES_DISPLAY_DURATION_MS=4000
 SHOW_INTERIM_ON_GLASSES=true
+GLASSES_CLEAR_AFTER_SILENCE_MS=5000
+LOG_TRANSCRIPT_EVENT_SHAPE=false
 ```
 
 `VIETNAMESE_DISPLAY_MODE` can be:
@@ -58,8 +63,10 @@ Glasses display settings:
 - `GLASSES_MAX_LINES`: number of recent final caption lines to show on glasses. Default: `4`.
 - `GLASSES_DISPLAY_DURATION_MS`: how long the recent final captions remain visible on glasses. Default: `4000`.
 - `SHOW_INTERIM_ON_GLASSES`: show interim transcript updates on glasses for lower latency. Default: `true`.
+- `GLASSES_CLEAR_AFTER_SILENCE_MS`: clear the glasses live caption window after this many milliseconds without transcript events. Default: `5000`.
+- `LOG_TRANSCRIPT_EVENT_SHAPE`: set to `true` temporarily to log transcript event keys and inspect speaker metadata availability. Default: `false`.
 
-The glasses display format is recent final lines plus one current interim line. New transcript events update the latest pending glasses text immediately; rapid interim bursts are lightly throttled to one render about every 120 ms, always using the newest transcript state. Display duration does not queue or delay newer captions.
+The glasses display format is recent final lines from the current speech window plus one current interim line. New transcript events update the latest pending glasses text immediately; rapid interim bursts are lightly throttled to one render about every 120 ms, always using the newest transcript state. Display duration does not queue or delay newer captions. After silence, the glasses live buffer is cleared so old conversation does not reappear when new speech starts.
 
 ## Install
 
@@ -164,7 +171,7 @@ Uh, ok
 Uh, okay.
 ```
 
-9. Confirm final captions remain as recent history, for example:
+9. Confirm final captions remain as recent history within the current speech window, for example:
 
 ```text
 Hello Long.
@@ -172,6 +179,8 @@ How are you?
 I am going to work.
 See you later.
 ```
+
+10. Stop speaking for at least 5 seconds, then speak again. The glasses should start a fresh caption window without old lines from the previous conversation.
 
 ## Development
 

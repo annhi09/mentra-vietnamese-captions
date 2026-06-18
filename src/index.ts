@@ -18,6 +18,8 @@ const GLASSES_MAX_LINES = parsePositiveInteger(process.env.GLASSES_MAX_LINES, 4)
 const GLASSES_DISPLAY_DURATION_MS = parsePositiveInteger(process.env.GLASSES_DISPLAY_DURATION_MS, 4000);
 const SHOW_INTERIM_ON_GLASSES = parseBoolean(process.env.SHOW_INTERIM_ON_GLASSES, true);
 const GLASSES_RENDER_THROTTLE_MS = 120;
+const GLASSES_CLEAR_AFTER_SILENCE_MS = parsePositiveInteger(process.env.GLASSES_CLEAR_AFTER_SILENCE_MS, 5000);
+const LOG_TRANSCRIPT_EVENT_SHAPE = parseBoolean(process.env.LOG_TRANSCRIPT_EVENT_SHAPE, false);
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
   if (!value) {
@@ -47,11 +49,55 @@ type TranscriptLogEntry = {
   timestamp: string;
 };
 
+function getSpeakerLabel(event: unknown): string {
+  const metadata = event as Record<string, unknown>;
+  const speakerValue =
+    metadata.speakerId ??
+    metadata.speaker ??
+    metadata.speakerLabel ??
+    metadata.speaker_id ??
+    metadata.speakerNumber;
+
+  if (speakerValue === undefined || speakerValue === null || speakerValue === "") {
+    return "";
+  }
+
+  const normalized = String(speakerValue).trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  const numericMatch = normalized.match(/\d+/);
+  return `[${numericMatch?.[0] ?? normalized}]`;
+}
+
+function formatSpeakerCaption(speakerLabel: string, text: string): string {
+  return speakerLabel ? `${speakerLabel} ${text}` : text;
+}
+
+function getTranscriptEventShapeSample(event: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(event).map(([key, value]) => {
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) {
+        return [key, value];
+      }
+
+      if (Array.isArray(value)) {
+        return [key, `[array:${value.length}]`];
+      }
+
+      return [key, typeof value];
+    }),
+  );
+}
+
 class VietnameseSafeCaptionsApp extends AppServer {
   private readonly transcriptLog: TranscriptLogEntry[] = [];
   private readonly browserClients = new Set<Response>();
   private currentInterimTranscript: TranscriptLogEntry | null = null;
   private readonly committedUtteranceIds = new Set<string>();
+  private hasLoggedTranscriptEventShape = false;
 
   constructor() {
     super({
@@ -71,6 +117,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
     let latestRenderedSequence = 0;
     let pendingGlassesRender: { sequence: number; text: string } | null = null;
     let glassesRenderTimer: ReturnType<typeof setTimeout> | null = null;
+    let silenceClearTimer: ReturnType<typeof setTimeout> | null = null;
     let lastGlassesRenderAt = 0;
 
     const getGlassesCaptionText = () => {
@@ -80,6 +127,50 @@ class VietnameseSafeCaptionsApp extends AppServer {
 
       return lines.join("\n");
     };
+
+    const clearGlassesDisplay = (sequence: number) => {
+      recentFinalDisplayLines.length = 0;
+      currentInterimDisplayLine = null;
+      pendingGlassesRender = null;
+      latestRenderableSequence = sequence;
+      latestRenderedSequence = sequence;
+
+      if (glassesRenderTimer) {
+        clearTimeout(glassesRenderTimer);
+        glassesRenderTimer = null;
+      }
+
+      lastGlassesRenderAt = Date.now();
+      session.layouts.showTextWall("", {
+        view: ViewType.MAIN,
+        durationMs: 1
+      });
+    };
+
+    const resetSilenceClearTimer = (sequence: number) => {
+      if (silenceClearTimer) {
+        clearTimeout(silenceClearTimer);
+      }
+
+      silenceClearTimer = setTimeout(() => {
+        if (sequence < transcriptSequence) {
+          return;
+        }
+
+        transcriptSequence += 1;
+        clearGlassesDisplay(transcriptSequence);
+      }, GLASSES_CLEAR_AFTER_SILENCE_MS);
+    };
+
+    this.addCleanupHandler(() => {
+      if (glassesRenderTimer) {
+        clearTimeout(glassesRenderTimer);
+      }
+
+      if (silenceClearTimer) {
+        clearTimeout(silenceClearTimer);
+      }
+    });
 
     const flushPendingGlassesRender = () => {
       glassesRenderTimer = null;
@@ -141,7 +232,17 @@ class VietnameseSafeCaptionsApp extends AppServer {
       const displayText = getVietnameseDisplayText(originalText, vietnameseDisplayMode);
       const metadata = data as unknown as Record<string, unknown>;
       const language = metadata.language ?? metadata.detectedLanguage ?? metadata.locale;
+      const speakerLabel = getSpeakerLabel(data);
+      const speakerDisplayText = formatSpeakerCaption(speakerLabel, displayText);
       const containsVietnamese = containsVietnameseCharacters(originalText);
+
+      if (LOG_TRANSCRIPT_EVENT_SHAPE && !this.hasLoggedTranscriptEventShape) {
+        this.hasLoggedTranscriptEventShape = true;
+        console.log("Transcript event shape", {
+          keys: Object.keys(metadata),
+          sample: getTranscriptEventShapeSample(metadata),
+        });
+      }
 
       const logEntry: TranscriptLogEntry = {
         id: typeof data.utteranceId === "string" ? data.utteranceId : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -168,9 +269,12 @@ class VietnameseSafeCaptionsApp extends AppServer {
         vietnameseDisplayMode,
         showInterimOnGlasses: SHOW_INTERIM_ON_GLASSES,
         transcriptSequence: eventSequence,
+        speakerLabel,
         sessionId,
         userId,
       });
+
+      resetSilenceClearTimer(eventSequence);
 
       if (!shouldRenderTranscript) {
         return;
@@ -178,7 +282,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
 
       if (data.isFinal) {
         currentInterimDisplayLine = null;
-        recentFinalDisplayLines.push(displayText);
+        recentFinalDisplayLines.push(speakerDisplayText);
 
         if (recentFinalDisplayLines.length > GLASSES_MAX_LINES) {
           recentFinalDisplayLines.splice(0, recentFinalDisplayLines.length - GLASSES_MAX_LINES);
@@ -189,7 +293,7 @@ class VietnameseSafeCaptionsApp extends AppServer {
       }
 
       if (SHOW_INTERIM_ON_GLASSES) {
-        currentInterimDisplayLine = displayText;
+        currentInterimDisplayLine = speakerDisplayText;
         scheduleGlassesRender(eventSequence);
       }
     })
